@@ -1,0 +1,10 @@
+pkgs:
+  gintro:
+    version: 0.1.0
+    license: MIT
+    description: Bindings to Gobject Introspection to generate other bindings.
+    source_url: "https://github.com/diegovsky/gintro"
+    root: src/main
+    files:
+      build.zig
+      src/*.zig
