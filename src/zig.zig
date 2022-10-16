@@ -1,37 +1,46 @@
 const std = @import("std");
+const gintro = @import("lib.zig");
+
+const allocator = std.heap.c_allocator;
 
 pub const FieldInfo = struct {
     name: []const u8,
     ty: []const u8,
 
-    pub fn format(value: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) std.os.WriteError!void {
-        return writer.print("<{s}: {s}>", .{ value.name, value.ty });
+    pub fn toZig(value: @This(), writer: anytype) std.os.WriteError!void {
+        return writer.print("{s}: {s}", .{ value.name, value.ty });
     }
+
 };
 
 pub const StructInfo = struct {
     name: []const u8,
     fields: []const FieldInfo,
 
-    pub fn format(sinfo: StructInfo, comptime args: []const u8, _: std.fmt.FormatOptions, writer: anytype) std.os.WriteError!void {
-        const pretty = if(args.len > 0) args[0] == 'p' else false;
-        try writer.print("pub const {s} = struct {{", .{sinfo.name});
-        // Ease code reuse.
-        const prettier = struct {
-            writer: @TypeOf(writer),
-
-            fn pretty_write(self: @This(), str: []const u8) !void {
-                if(pretty) {
-                    _ = try self.writer.write(str);
-                }
+    pub fn toZig(value: @This(), writer: anytype) std.os.WriteError!void {
+        try writer.print("pub const {s} = struct {{", .{value.name});
+        for (value.fields) |finfo, i| {
+            try finfo.toZig(writer);
+            if(i != value.fields.len) {
+                try writer.writeAll(",\n");
             }
-        } {.writer = writer};
-        try prettier.pretty_write("\n");
-        for (sinfo.fields) |finfo| {
-            try prettier.pretty_write(" "**2);
-            try writer.print("{},", .{finfo});
         }
-        try prettier.pretty_write("\n");
-        _ = try writer.write("};");
+        try writer.writeAll("}}\n");
+    }
+
+    pub fn new(info: gintro.StructInfo) @This() {
+        var list = std.ArrayList(FieldInfo).init(allocator);
+        var it = info.getFieldsIterator();
+        while(it.next()) |field| {
+            list.append(.FieldInfo {.name = field.upcast().getName().?.slice()}) orelse unreachable;
+        }
+        return . {
+            .name = info.upcast().getName().?.slice(),
+            .ty = list.toOwnedSlice(),
+        };
+    }
+
+    pub fn deinit(self: @This()) void {
+        allocator.free(self.fields);
     }
 };
