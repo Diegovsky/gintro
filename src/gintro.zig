@@ -10,14 +10,14 @@ pub fn main() !void {
     // var gi = gintro.Namespace{ .name = "Gtk", .version = "4.0" };
     _ = try repo.require(&gi, .LoadLazy);
     var iterator = repo.getInfoIterator(&gi);
-    // var stdout = std.io.getStdOut();
-    var stdout = try std.fs.createFileAbsolute("/tmp/pog.txt", .{ .truncate = true });
+    var stdout = std.io.getStdOut();
+    // var stdout = try std.fs.createFileAbsolute("/tmp/pog.txt", .{ .truncate = true });
     std.debug.print("Pog \n", .{});
     while (iterator.next()) |info| {
         defer info.unref();
-        // std.debug.print("Pog: {?s}\n", .{info.getName()});
+        std.debug.print("Pog: {?s}\n", .{info.getName().?.items});
         if (info.tryCast(gintro.StructInfo)) |sinfo| {
-            // std.debug.print("Struct: {?s}\n", .{sinfo.super().getName()});
+            std.debug.print("Struct: {?s}\n", .{sinfo.getName().?.items});
             var zinfo = zig.StructInfo.new(sinfo);
             defer zinfo.deinit();
             try zinfo.toZig(stdout.writer());

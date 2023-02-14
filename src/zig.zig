@@ -31,20 +31,16 @@ pub const StructInfo = struct {
         var list = std.ArrayList(FieldInfo).init(allocator);
         var it = info.getFieldsIterator();
         while (it.next()) |field| {
-            defer field.unref();
-            if (field.super().getName()) |name| {
-                if (field.getType().super().getName()) |tname| {
-                    const zinfo = FieldInfo{ .name = name.slice(), .ty = tname.slice() };
-                    list.append(zinfo) catch unreachable;
-                } else {
-                    var nname = name;
-                    std.debug.print("Failed to get typename of {s}\n", .{nname.slice()});
-                }
-            }
+            // defer field.unref();
+            var name = field.getName().?.items;
+            var tname = field.getType().getName().?.items;
+            std.debug.print("Name: {s}, TName: {s}\n", .{ name, tname });
+            // const zinfo = FieldInfo{ .name = name, .ty = tname };
+            // list.append(zinfo) catch unreachable;
         }
         std.debug.print("Slice: {any} len: {d}\n", .{ list.items, list.items.len });
         return .{
-            .name = info.super().getName().?.slice(),
+            .name = info.getName().?.items,
             .fields = list.toOwnedSlice(),
         };
     }

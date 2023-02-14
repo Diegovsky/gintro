@@ -16,13 +16,13 @@ pub fn gbool(value: C.gboolean) bool {
 }
 
 pub const String = struct {
-    raw: [*c]const C.gchar,
+    items: []const C.gchar,
     should_free: bool = true,
 
     const Self = @This();
 
     pub fn format(value: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        try std.fmt.formatText(value.slice(), fmt, options, writer);
+        try std.fmt.formatText(value.items, fmt, options, writer);
     }
 
     pub fn new_borrowed(str: [*:0]const u8) Self {
@@ -42,12 +42,6 @@ pub const String = struct {
         return Self.new_copied(self.raw);
     }
 
-    pub fn slice(self: Self) []const u8 {
-        const strlen = std.mem.len(self.raw);
-        std.debug.print("\nStrlen: {d}\n", .{strlen});
-        return self.raw[0..strlen];
-    }
-
     pub fn deinit(self: Self) void {
         if (self.should_free) {
             C.g_free(self.raw);
@@ -56,9 +50,10 @@ pub const String = struct {
 
     pub fn fromC(raw: [*c]const C.gchar, should_free: bool) Self {
         if (raw == null) {
-            return .{ .raw = "", .should_free = should_free };
+            return .{ .items = "", .should_free = should_free };
         }
-        return .{ .raw = raw, .should_free = should_free };
+        const strlen = std.mem.len(raw);
+        return .{ .items = raw[0..strlen], .should_free = should_free };
     }
 };
 
@@ -115,7 +110,7 @@ fn Iterator(comptime Iterable: type, comptime Get: type) type {
         }
 
         pub fn next(self: *@This()) ?Get {
-            // std.debug.print("Len {s}: {d}\n", .{ @typeName(@This()), self.len });
+            std.debug.print("Len {s}: {d}\n", .{ @typeName(@This()), self.len });
             if (self.i >= self.len) {
                 return null;
             }
@@ -220,120 +215,125 @@ pub const BaseInfo = struct {
     raw: *Raw,
 
     const Self = @This();
-    const Raw = C.GIBaseInfo;
 
-    pub fn ref(self: *Self) Self {
-        return .{ .raw = C.g_base_info_ref(self.raw).? };
-    }
-    /// Call this when you're done with this `BaseInfo`.
-    pub fn unref(self: Self) void {
-        C.g_base_info_unref(self.raw);
-    }
-    /// Get the introspection type.
-    pub fn getType(self: *const Self) InfoType {
-        var value = C.g_base_info_get_type(self.raw);
-        return InfoType.fromC(value);
-    }
-    pub fn getName(self: *const Self) ?String {
-        const res = C.g_base_info_get_name(self.raw);
-        if (res) |name| {
-            return String.fromC(name, false);
-        }
-        return null;
-    }
+    const Raw = C.GIBaseInfo;
+    pub usingnamespace ExtendBaseInfo(@This(), Raw);
 
     pub fn is(value: anytype) bool {
         return C.GI_IS_BASE_INFO(value.raw);
     }
+};
 
-    pub fn tryCast(self: *const Self, comptime T: type) ?T {
-        if (T.is(self)) {
-            return T.fromC(@ptrCast(*T.Raw, self.raw));
-        }
-        return null;
-    }
+pub fn ExtendBaseInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        raw: *Raw,
 
-    const BaseInfoAttributesIterator = struct {
-        raw: C.GIAttributeIter,
-        ref: BaseInfo,
-
-        pub fn new(ref_: BaseInfo) @This() {
-            return .{
-                .raw = std.mem.zeroes(C.GIAttributeIter),
-                .ref = ref_,
-            };
-        }
-
-        pub fn next(self: *@This()) ?[2]String {
-            var name: [*c]C.gchar = undefined;
-            var val: [*c]C.gchar = undefined;
-            if (C.g_base_info_iterate_attributes(self.ref.raw, &self.raw, &name, &val) == 1) {
-                const nstr = String.fromC(name);
-                const vstr = String.fromC(val);
-                return .{ nstr, vstr };
-            } else {
-                return null;
+        pub usingnamespace FallbackDecl(struct {
+            pub fn fromC(raw: [*c]Raw) Self {
+                return .{ .raw = @alignCast(@alignOf(*Raw), raw) };
             }
+        });
+
+        pub fn ref(self: *Self) Self {
+            return .{ .raw = C.g_base_info_ref(self.raw).? };
+        }
+        /// Call this when you're done with this `BaseInfo`.
+        pub fn unref(self: Self) void {
+            C.g_base_info_unref(self.raw);
+        }
+        /// Get the introspection type.
+        pub fn getInfoType(self: Self) InfoType {
+            var value = C.g_base_info_get_type(self.raw);
+            return InfoType.fromC(value);
+        }
+        pub fn getName(self: Self) ?String {
+            const res = C.g_base_info_get_name(self.raw);
+            if (res) |name| {
+                return String.fromC(name, false);
+            }
+            return null;
+        }
+
+        pub fn tryCast(self: *const Self, comptime T: type) ?T {
+            if (T.is(self)) {
+                return T.fromC(@ptrCast(*T.Raw, self.raw));
+            }
+            return null;
+        }
+
+        const BaseInfoAttributesIterator = struct {
+            raw: C.GIAttributeIter,
+            ref: BaseInfo,
+
+            pub fn new(ref_: BaseInfo) @This() {
+                return .{
+                    .raw = std.mem.zeroes(C.GIAttributeIter),
+                    .ref = ref_,
+                };
+            }
+
+            pub fn next(self: *@This()) ?[2]String {
+                var name: [*c]C.gchar = undefined;
+                var val: [*c]C.gchar = undefined;
+                if (C.g_base_info_iterate_attributes(self.ref.raw, &self.raw, &name, &val) == 1) {
+                    const nstr = String.fromC(name);
+                    const vstr = String.fromC(val);
+                    return .{ nstr, vstr };
+                } else {
+                    return null;
+                }
+            }
+        };
+
+        pub fn getAttributeIterator(self: Self) BaseInfoAttributesIterator {
+            return BaseInfoAttributesIterator.new(self);
         }
     };
-
-    pub fn getAttributeIterator(self: Self) BaseInfoAttributesIterator {
-        return BaseInfoAttributesIterator.new(self);
-    }
-
-    pub fn fromC(raw: [*c]Raw) Self {
-        return .{ .raw = @alignCast(@alignOf(*Raw), raw) };
-    }
-};
+}
 
 pub const StructInfo = struct {
     raw: *Raw,
 
     pub const Raw = C.GIStructInfo;
-    pub const Super = BaseInfo;
-    const Self = @This();
-
-    // Boilerplate
-    pub fn fromC(raw: [*c]Raw) Self {
-        return Self{ .raw = raw };
-    }
-
-    pub fn ref(self: Self) Self {
-        const ptr = Self.fromC(self.super().ref().raw);
-        if (@ptrToInt(ptr) != @ptrToInt(self.raw)) {
-            unreachable;
-        }
-        return ptr;
-    }
-
-    pub fn super(self: Self) Super {
-        return Super.fromC(@ptrCast(*Super.Raw, self.raw));
-    }
-
-    pub fn unref(self: Self) void {
-        self.super().unref();
-    }
+    pub usingnamespace ExtendStructInfo(@This(), Raw);
 
     pub fn is(value: anytype) bool {
         return C.GI_IS_STRUCT_INFO(value.raw);
     }
-
-    // Subclass code
-    const FieldsIterator = Iterator(struct {
-        raw: *FieldInfo.Raw,
-
-        pub fn index(self: @This(), i: c_int) *FieldInfo.Raw {
-            return C.g_struct_info_get_field(self.raw, i);
-        }
-        pub fn len(self: @This()) c_int {
-            return C.g_struct_info_get_n_fields(self.raw);
-        }
-    }, FieldInfo);
-
-    pub fn getFieldsIterator(self: Self) FieldsIterator {
-        return FieldsIterator.new(.{ .raw = self.raw });
-    }
 };
+
+pub fn FallbackDecl(comptime Decl: type) type {
+    if (!@hasDecl(Decl, "is")) {
+        return Decl;
+    } else {
+        return struct {};
+    }
+}
+
+pub fn ExtendStructInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub const Super = BaseInfo;
+
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        // Subclass code
+        const FieldsIterator = Iterator(struct {
+            raw: *StructInfo.Raw,
+
+            pub fn index(self: @This(), i: c_int) *FieldInfo.Raw {
+                return C.g_struct_info_get_field(self.raw, i);
+            }
+            pub fn len(self: @This()) c_int {
+                return C.g_struct_info_get_n_fields(self.raw);
+            }
+        }, FieldInfo);
+
+        /// Iterates over all the fields of this struct. Don't forget to call `unref`.
+        pub fn getFieldsIterator(self: Self) FieldsIterator {
+            return FieldsIterator.new(.{ .raw = self.raw });
+        }
+    };
+}
 
 pub const TypeInfoFlags = struct {
     raw: C.GIFieldInfo,
@@ -351,46 +351,29 @@ pub const FieldInfo = struct {
     raw: *Raw,
 
     pub const Raw = C.GIFieldInfo;
-    pub const Super = BaseInfo;
-    const Self = @This();
-
-    // Boilerplate
-    pub fn fromC(raw: [*c]Raw) Self {
-        return Self{ .raw = raw };
-    }
-
-    pub fn ref(self: Self) Self {
-        return Self.fromC(self.super().ref().raw);
-    }
-
-    pub fn super(self: Self) Super {
-        return Super.fromC(@ptrCast(*Super.Raw, self.raw));
-    }
-
-    pub fn tryCast(self: Self, comptime T: type) ?T {
-        return self.super().tryCast(T);
-    }
-
-    pub fn unref(self: Self) void {
-        self.super().unref();
-    }
-
-    // Subclass code
-    pub fn getType(self: Self) TypeInfo {
-        return TypeInfo.fromC(C.g_field_info_get_type(self.raw));
-    }
-    pub fn getFlags(self: Self) TypeInfoFlags {
-        return TypeInfoFlags{ .raw = C.g_field_info_get_flags(self.raw) };
-    }
-
-    pub fn getSize(self: Self) usize {
-        return @intCast(usize, C.g_field_info_get_size(self.raw));
-    }
-
-    pub fn getOffset(self: Self) usize {
-        return @intCast(usize, C.g_field_info_get_offset(self.raw));
-    }
+    pub usingnamespace ExtendFieldInfo(@This(), Raw);
 };
+
+pub fn ExtendFieldInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        pub fn getType(self: Self) TypeInfo {
+            return TypeInfo.fromC(C.g_field_info_get_type(self.raw));
+        }
+        pub fn getFlags(self: Self) TypeInfoFlags {
+            return TypeInfoFlags{ .raw = C.g_field_info_get_flags(self.raw) };
+        }
+
+        pub fn getSize(self: Self) usize {
+            return @intCast(usize, C.g_field_info_get_size(self.raw));
+        }
+
+        pub fn getOffset(self: Self) usize {
+            return @intCast(usize, C.g_field_info_get_offset(self.raw));
+        }
+    };
+}
 
 const TypeTag = enum(c_int) {
     Void = C.GI_TYPE_TAG_VOID,
@@ -424,70 +407,44 @@ const TypeTag = enum(c_int) {
 pub const TypeInfo = struct {
     raw: *Raw,
 
-    pub const Raw = C.GITypeInfo;
-    pub const Super = BaseInfo;
+    pub usingnamespace ExtendTypeInfo(Self, Raw);
+
     const Self = @This();
-
-    // Boilerplate
-    pub fn fromC(raw: [*c]Raw) Self {
-        return Self{ .raw = raw };
-    }
-
-    pub fn ref(self: Self) Self {
-        return Self.fromC(self.super().ref().raw);
-    }
-
-    pub fn super(self: Self) Super {
-        return Super.fromC(@ptrCast(*Super.Raw, self.raw));
-    }
-
-    pub fn tryCast(self: Self, comptime T: type) ?T {
-        return self.super().tryCast(T);
-    }
-
-    pub fn unref(self: Self) void {
-        self.super().unref();
-    }
-
-    // Subclass code
-    pub fn getTypeName(self: Self) String {
-        var str = C.g_registered_type_info_get_type_name(self.raw);
-        return String.fromC(str, false);
-    }
-
-    pub fn getGType(self: Self) C.GType {
-        return C.g_registered_type_info_get_type_name(self.raw);
-    }
-
-    pub fn getTag(self: Self) TypeTag {
-        return TypeTag.fromC(C.g_registered_type_info_get_tag(self.raw));
-    }
+    pub const Raw = C.GITypeInfo;
 };
 
-fn wrap(comptime T: type) type {
-    const Raw = T.Raw;
-    const Super = T.Super;
-    const Self = T;
+pub fn ExtendTypeInfo(comptime Self: type, comptime Raw: type) type {
     return struct {
-        pub usingnamespace T;
+        pub const Super = BaseInfo;
+
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        // Subclass code
+        pub fn getTypeName(self: Self) String {
+            var str = C.g_registered_type_info_get_type_name(self.raw);
+            return String.fromC(str, false);
+        }
+
+        pub fn getGType(self: Self) C.GType {
+            return C.g_registered_type_info_get_type_name(self.raw);
+        }
+
+        pub fn getTag(self: Self) TypeTag {
+            return TypeTag.fromC(C.g_registered_type_info_get_tag(self.raw));
+        }
+    };
+}
+
+fn subclass(comptime Super: type, comptime Self: type) type {
+    return struct {
+        raw: *Raw,
+
+        const Raw = Self.Raw;
+        pub usingnamespace Self;
+        pub usingnamespace Super;
+
         pub fn fromC(raw: [*c]Raw) Self {
             return Self{ .raw = raw };
-        }
-
-        pub fn ref(self: Self) Self {
-            return Self.fromC(self.super().ref().raw);
-        }
-
-        pub fn super(self: Self) Super {
-            return Super.fromC(@ptrCast(*Super.Raw, self.raw));
-        }
-
-        pub fn tryCast(self: Self, comptime R: type) ?R {
-            return self.super().tryCast(R);
-        }
-
-        pub fn unref(self: Self) void {
-            self.super().unref();
         }
     };
 }
