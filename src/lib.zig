@@ -3,84 +3,53 @@ const C = @cImport(@cInclude("girepository.h"));
 
 pub const RepositoryLoadFlags = enum(c_int) {
     LoadLazy = C.G_IREPOSITORY_LOAD_FLAG_LAZY,
+    None = 0,
     _,
 };
 
 pub const Namespace = struct {
-    name: [*c]const u8,
-    version: [*c]const u8,
+    name: [*:0]const u8,
+    version: [*:0]const u8,
 };
 
 pub fn gbool(value: C.gboolean) bool {
-    return value == C.TRUE;
+    return value != 0;
 }
 
-pub const String = struct {
-    items: []const C.gchar,
-    should_free: bool = true,
-
-    const Self = @This();
-
-    pub fn format(value: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        try std.fmt.formatText(value.items, fmt, options, writer);
+pub const GString = []const C.gchar;
+pub fn stringFromC(raw: [*c]const C.gchar) ?GString {
+    if (raw) |ptr| {
+        const len = std.mem.len(ptr);
+        return ptr[0..len];
     }
+    return null;
+}
 
-    pub fn new_borrowed(str: [*:0]const u8) Self {
-        return .{
-            .raw = str,
-            .should_free = false,
-        };
+pub fn freeGString(str: GString) void {
+    C.g_free(@intFromPtr(str.ptr));
+}
+
+pub const VString = []const [*c]const C.gchar;
+
+pub fn vstringFromC(raw: [*c]const [*c]const C.gchar) ?VString {
+    if (raw) |ptr| {
+        const len = std.mem.len(ptr);
+        return ptr[0..len];
     }
+    return null;
+}
 
-    pub fn new_copied(str: [*:0]const u8) Self {
-        return .{
-            .raw = C.g_strdup(str),
-        };
-    }
-
-    pub fn copy(self: Self) Self {
-        return Self.new_copied(self.raw);
-    }
-
-    pub fn deinit(self: Self) void {
-        if (self.should_free) {
-            C.g_free(self.raw);
-        }
-    }
-
-    pub fn fromC(raw: [*c]const C.gchar, should_free: bool) Self {
-        if (raw == null) {
-            return .{ .items = "", .should_free = should_free };
-        }
-        const strlen = std.mem.len(raw);
-        return .{ .items = raw[0..strlen], .should_free = should_free };
-    }
-};
-
-pub const VString = struct {
-    raw: [*:0]const [*:0]const C.gchar,
-    should_free: bool = true,
-
-    const Self = @This();
-
-    pub fn deinit(self: Self) void {
-        if (self.should_free) {
-            C.g_strfreev(self.raw);
-        }
-    }
-    /// The returned string should not be `deinit`ed.
-    pub fn get(self: Self, id: usize) String {
-        return .{ .raw = self.raw[id] };
-    }
-
-    pub fn fromC(raw: [*c]const [*c]const C.gchar) Self {
-        return .{ .raw = @alignCast(@alignOf([*:0][*:0]C.gchar), raw) };
-    }
-};
+pub fn freeVString(str: VString) void {
+    C.g_strfreev(@ptrFromInt(@intFromPtr(str.ptr)));
+}
 
 /// Currently, acquiring a typelib from a repository is the only supported way.
 pub const TypeLib = struct {
     raw: *C.GITypelib,
+
+    pub fn getNamespace(self: @This()) GString {
+        return stringFromC(C.g_typelib_get_namespace(self.raw)).?;
+    }
 };
 
 /// This handles every error directly caused by the GObject Introspection library.
@@ -110,7 +79,6 @@ fn Iterator(comptime Iterable: type, comptime Get: type) type {
         }
 
         pub fn next(self: *@This()) ?Get {
-            std.debug.print("Len {s}: {d}\n", .{ @typeName(@This()), self.len });
             if (self.i >= self.len) {
                 return null;
             }
@@ -144,7 +112,7 @@ pub const InfoType = enum(c_int) {
     Unresolved = C.GI_INFO_TYPE_UNRESOLVED,
 
     pub fn fromC(en: c_uint) @This() {
-        return @intToEnum(InfoType, en);
+        return @as(InfoType, @enumFromInt(en));
     }
 };
 
@@ -164,8 +132,8 @@ pub const Repository = struct {
     }
     /// Be aware the flag argument *will probably change* due to the API only specifying ONE flag.
     /// If this returns an UnknownError, it happened in GLib. In that case, more information is avaliable at Repository.last_error.
-    pub fn require(self: *Self, namespace: *Namespace, flag: RepositoryLoadFlags) RepositoryError!TypeLib {
-        var raw = C.g_irepository_require(self.raw, namespace.name, namespace.version, @intCast(c_uint, @enumToInt(flag)), &self.last_error);
+    pub fn require(self: *Self, namespace: Namespace, flag: RepositoryLoadFlags) RepositoryError!TypeLib {
+        var raw = C.g_irepository_require(self.raw, namespace.name, namespace.version, @as(c_uint, @intCast(@intFromEnum(flag))), &self.last_error);
         if (raw) |ptr| {
             return TypeLib{ .raw = ptr };
         } else if (self.last_error) |err| {
@@ -180,19 +148,22 @@ pub const Repository = struct {
             unreachable;
         }
     }
+
     /// You should free the resulting array with `VString.deinit`.
-    pub fn getDependencies(self: *Self, namespace: *Namespace) ?VString {
-        var raw = C.g_irepository_get_dependencies(self.raw, namespace.name) orelse return null;
-        return .{ .raw = raw };
+    ///
+    /// Note: before you call this, you should call `require` to make sure the namespace is loaded.
+    pub fn getDependencies(self: *Self, namespace: Namespace) ?VString {
+        var raw = C.g_irepository_get_dependencies(self.raw, namespace.name);
+        return vstringFromC(raw);
     }
     /// See [getDependencies] for more info.
-    pub fn getImmediateDependencies(self: *Self, namespace: *Namespace) ?VString {
-        var raw = C.g_irepository_get_immediate_dependencies(self.raw, namespace.name) orelse return null;
-        return .{ .raw = raw };
+    pub fn getImmediateDependencies(self: *Self, namespace: Namespace) ?VString {
+        var raw = C.g_irepository_get_immediate_dependencies(self.raw, namespace.name);
+        return vstringFromC(raw);
     }
 
     const InfoIterator = Iterator(struct {
-        namespace: *Namespace,
+        namespace: Namespace,
         repo: *C.GIRepository,
 
         const Raw = C.GIBaseInfo;
@@ -206,10 +177,19 @@ pub const Repository = struct {
         }
     }, BaseInfo);
 
-    pub fn getInfoIterator(self: *Self, namespace: *Namespace) InfoIterator {
+    /// Returns an `Iterator` that goes through all the `BaseInfo`s in the given namespace.
+    pub fn getInfoIterator(self: *Self, namespace: Namespace) InfoIterator {
         return InfoIterator.new(.{ .namespace = namespace, .repo = self.raw });
     }
 };
+
+fn FallbackDecl(comptime name: []const u8, comptime Decl: type) type {
+    if (!@hasDecl(Decl, name)) {
+        return Decl;
+    } else {
+        return struct {};
+    }
+}
 
 pub const BaseInfo = struct {
     raw: *Raw,
@@ -218,9 +198,9 @@ pub const BaseInfo = struct {
 
     const Raw = C.GIBaseInfo;
     pub usingnamespace ExtendBaseInfo(@This(), Raw);
-
     pub fn is(value: anytype) bool {
-        return C.GI_IS_BASE_INFO(value.raw);
+        _ = value;
+        return true;
     }
 };
 
@@ -228,56 +208,71 @@ pub fn ExtendBaseInfo(comptime Self: type, comptime Raw: type) type {
     return struct {
         raw: *Raw,
 
-        pub usingnamespace FallbackDecl(struct {
-            pub fn fromC(raw: [*c]Raw) Self {
-                return .{ .raw = @alignCast(@alignOf(*Raw), raw) };
-            }
-        });
+        pub fn fromC(raw: [*c]Raw) Self {
+            const self = Self{ .raw = @alignCast(@ptrCast(raw)) };
+            std.debug.assert(Self.is(self));
+            return self;
+        }
 
-        pub fn ref(self: *Self) Self {
+        /// Call this to create a strong reference to this `BaseInfo`.
+        pub fn ref(self: Self) Self {
             return .{ .raw = C.g_base_info_ref(self.raw).? };
         }
         /// Call this when you're done with this `BaseInfo`.
         pub fn unref(self: Self) void {
             C.g_base_info_unref(self.raw);
         }
-        /// Get the introspection type.
+        /// Gets this `BaseInfo` introspection type. Note that this is a "meta"
+        /// function that describes the type of the `BaseInfo` instance.
+        ///
+        /// Note: This is useful for casting to the given `subclass`.
         pub fn getInfoType(self: Self) InfoType {
             var value = C.g_base_info_get_type(self.raw);
             return InfoType.fromC(value);
         }
-        pub fn getName(self: Self) ?String {
+        /// Returns the name of this `BaseInfo`.
+        ///
+        /// Note: Often, this is a human readable name and 99% what you'll want
+        /// to use when generating code.
+        pub fn getName(self: Self) ?GString {
             const res = C.g_base_info_get_name(self.raw);
-            if (res) |name| {
-                return String.fromC(name, false);
+            return stringFromC(res);
+        }
+
+        /// Tries to cast to `T` and returns `null` if it fails
+        pub fn tryCast(self: Self, comptime T: type) ?T {
+            if (T.is(self)) {
+                return Self.uncheckedCast(self, T);
             }
             return null;
         }
 
-        pub fn tryCast(self: *const Self, comptime T: type) ?T {
-            if (T.is(self)) {
-                return T.fromC(@ptrCast(*T.Raw, self.raw));
-            }
-            return null;
+        /// Casts to `T` without checking if it's the correct type
+        pub fn uncheckedCast(self: Self, comptime T: type) T {
+            return T.fromC(@as(*T.Raw, @ptrCast(self.raw)));
+        }
+
+        pub fn equal(self: Self, other: anytype) bool {
+            return gbool(C.g_base_info_equal(self.raw, other.raw));
         }
 
         const BaseInfoAttributesIterator = struct {
             raw: C.GIAttributeIter,
-            ref: BaseInfo,
+            ref: Self,
 
-            pub fn new(ref_: BaseInfo) @This() {
+            pub fn new(ref_: Self) @This() {
                 return .{
                     .raw = std.mem.zeroes(C.GIAttributeIter),
                     .ref = ref_,
                 };
             }
 
-            pub fn next(self: *@This()) ?[2]String {
+            pub fn next(self: *@This()) ?[2]GString {
                 var name: [*c]C.gchar = undefined;
                 var val: [*c]C.gchar = undefined;
                 if (C.g_base_info_iterate_attributes(self.ref.raw, &self.raw, &name, &val) == 1) {
-                    const nstr = String.fromC(name);
-                    const vstr = String.fromC(val);
+                    const nstr = stringFromC(name).?;
+                    const vstr = stringFromC(val).?;
                     return .{ nstr, vstr };
                 } else {
                     return null;
@@ -285,8 +280,64 @@ pub fn ExtendBaseInfo(comptime Self: type, comptime Raw: type) type {
             }
         };
 
+        pub fn getTypeLib(self: Self) TypeLib {
+            return TypeLib{ .raw = @ptrCast(C.g_base_info_get_typelib(self.raw)) };
+        }
+
         pub fn getAttributeIterator(self: Self) BaseInfoAttributesIterator {
             return BaseInfoAttributesIterator.new(self);
+        }
+    };
+}
+
+pub const ConstantInfo = struct {
+    raw: *Raw,
+    pub const Raw = C.GIConstantInfo;
+    pub usingnamespace ExtendConstantInfo(@This(), Raw);
+    const Self = @This();
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_CONSTANT_INFO(value.raw);
+    }
+};
+
+pub fn ExtendConstantInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+        pub fn getType(self: Self) TypeInfo {
+            return TypeInfo.fromC(C.g_constant_info_get_type(self.raw));
+        }
+        pub fn getValue(self: Self) Argument {
+            var value: Argument = undefined;
+            C.g_constant_info_get_value(self.raw, &value);
+            return value;
+        }
+    };
+}
+
+pub const RegisteredTypeInfo = struct {
+    raw: *Raw,
+
+    pub const Raw = C.GIRegisteredTypeInfo;
+    pub usingnamespace ExtendRegisteredTypeInfo(Self, Raw);
+
+    const Self = @This();
+};
+
+pub fn ExtendRegisteredTypeInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        raw: *Raw,
+
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        /// Obtain the type name of the struct within the GObject type system.
+        /// This type can be passed to g_type_name() to get a GType.
+        pub fn getTypeName(self: Self) ?GString {
+            var str = C.g_registered_type_info_get_type_name(self.raw);
+            return stringFromC(str);
+        }
+
+        pub fn getGType(self: Self) C.GType {
+            return C.g_registered_type_info_get_g_type(self.raw);
         }
     };
 }
@@ -302,21 +353,10 @@ pub const StructInfo = struct {
     }
 };
 
-pub fn FallbackDecl(comptime Decl: type) type {
-    if (!@hasDecl(Decl, "is")) {
-        return Decl;
-    } else {
-        return struct {};
-    }
-}
-
 pub fn ExtendStructInfo(comptime Self: type, comptime Raw: type) type {
     return struct {
-        pub const Super = BaseInfo;
+        pub usingnamespace ExtendRegisteredTypeInfo(Self, Raw);
 
-        pub usingnamespace ExtendBaseInfo(Self, Raw);
-
-        // Subclass code
         const FieldsIterator = Iterator(struct {
             raw: *StructInfo.Raw,
 
@@ -332,11 +372,26 @@ pub fn ExtendStructInfo(comptime Self: type, comptime Raw: type) type {
         pub fn getFieldsIterator(self: Self) FieldsIterator {
             return FieldsIterator.new(.{ .raw = self.raw });
         }
+
+        pub fn getMethodsIterator(self: Self) MethodsIterator {
+            return MethodsIterator.new(.{ .raw = self.raw });
+        }
+
+        const MethodsIterator = Iterator(struct {
+            raw: *StructInfo.Raw,
+
+            pub fn index(self: @This(), i: c_int) *FunctionInfo.Raw {
+                return C.g_struct_info_get_method(self.raw, i);
+            }
+            pub fn len(self: @This()) c_int {
+                return C.g_struct_info_get_n_methods(self.raw);
+            }
+        }, FunctionInfo);
     };
 }
 
 pub const TypeInfoFlags = struct {
-    raw: C.GIFieldInfo,
+    raw: C.GIFieldInfoFlags,
 
     pub fn isReadable(self: @This()) bool {
         return (self.raw & C.GI_FIELD_IS_READABLE) != 0;
@@ -352,6 +407,10 @@ pub const FieldInfo = struct {
 
     pub const Raw = C.GIFieldInfo;
     pub usingnamespace ExtendFieldInfo(@This(), Raw);
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_FIELD_INFO(value.raw);
+    }
 };
 
 pub fn ExtendFieldInfo(comptime Self: type, comptime Raw: type) type {
@@ -366,41 +425,55 @@ pub fn ExtendFieldInfo(comptime Self: type, comptime Raw: type) type {
         }
 
         pub fn getSize(self: Self) usize {
-            return @intCast(usize, C.g_field_info_get_size(self.raw));
+            return @as(usize, @intCast(C.g_field_info_get_size(self.raw)));
         }
 
         pub fn getOffset(self: Self) usize {
-            return @intCast(usize, C.g_field_info_get_offset(self.raw));
+            return @as(usize, @intCast(C.g_field_info_get_offset(self.raw)));
         }
     };
 }
 
-const TypeTag = enum(c_int) {
+pub const TypeTag = enum(c_uint) {
     Void = C.GI_TYPE_TAG_VOID,
     Boolean = C.GI_TYPE_TAG_BOOLEAN,
     Int8 = C.GI_TYPE_TAG_INT8,
-    Uint8 = C.GI_TYPE_TAG_UINT8,
+    UInt8 = C.GI_TYPE_TAG_UINT8,
     Int16 = C.GI_TYPE_TAG_INT16,
-    Uint16 = C.GI_TYPE_TAG_UINT16,
+    UInt16 = C.GI_TYPE_TAG_UINT16,
     Int32 = C.GI_TYPE_TAG_INT32,
-    Uint32 = C.GI_TYPE_TAG_UINT32,
+    UInt32 = C.GI_TYPE_TAG_UINT32,
     Int64 = C.GI_TYPE_TAG_INT64,
-    Uint64 = C.GI_TYPE_TAG_UINT64,
+    UInt64 = C.GI_TYPE_TAG_UINT64,
     Float = C.GI_TYPE_TAG_FLOAT,
     Double = C.GI_TYPE_TAG_DOUBLE,
-    Gtype = C.GI_TYPE_TAG_GTYPE,
-    Utf8 = C.GI_TYPE_TAG_UTF8,
+    GType = C.GI_TYPE_TAG_GTYPE,
+    UTF8 = C.GI_TYPE_TAG_UTF8,
     Filename = C.GI_TYPE_TAG_FILENAME,
     Array = C.GI_TYPE_TAG_ARRAY,
     Interface = C.GI_TYPE_TAG_INTERFACE,
-    Glist = C.GI_TYPE_TAG_GLIST,
-    Gslist = C.GI_TYPE_TAG_GSLIST,
-    Ghash = C.GI_TYPE_TAG_GHASH,
-    Error = C.GI_TYPE_TAG_ERROR,
+    GList = C.GI_TYPE_TAG_GLIST,
+    GSList = C.GI_TYPE_TAG_GSLIST,
+    GHashTable = C.GI_TYPE_TAG_GHASH,
+    GError = C.GI_TYPE_TAG_ERROR,
     Unichar = C.GI_TYPE_TAG_UNICHAR,
 
-    fn fromC(raw: c_int) @This() {
-        return @intToEnum(@This(), raw);
+    fn fromC(raw: c_uint) @This() {
+        return @as(@This(), @enumFromInt(raw));
+    }
+
+    pub fn toString(self: @This()) GString {
+        return stringFromC(C.g_type_tag_to_string(@intFromEnum(self))).?;
+    }
+};
+const ArrayType = enum(c_uint) {
+    C = C.GI_ARRAY_TYPE_C,
+    Array = C.GI_ARRAY_TYPE_ARRAY,
+    PtrArray = C.GI_ARRAY_TYPE_PTR_ARRAY,
+    ByteArray = C.GI_ARRAY_TYPE_BYTE_ARRAY,
+
+    fn fromC(raw: c_uint) @This() {
+        return @as(@This(), @enumFromInt(raw));
     }
 };
 
@@ -411,6 +484,10 @@ pub const TypeInfo = struct {
 
     const Self = @This();
     pub const Raw = C.GITypeInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_TYPE_INFO(value.raw);
+    }
 };
 
 pub fn ExtendTypeInfo(comptime Self: type, comptime Raw: type) type {
@@ -419,71 +496,405 @@ pub fn ExtendTypeInfo(comptime Self: type, comptime Raw: type) type {
 
         pub usingnamespace ExtendBaseInfo(Self, Raw);
 
-        // Subclass code
-        pub fn getTypeName(self: Self) String {
-            var str = C.g_registered_type_info_get_type_name(self.raw);
-            return String.fromC(str, false);
-        }
-
-        pub fn getGType(self: Self) C.GType {
-            return C.g_registered_type_info_get_type_name(self.raw);
-        }
-
         pub fn getTag(self: Self) TypeTag {
-            return TypeTag.fromC(C.g_registered_type_info_get_tag(self.raw));
+            return TypeTag.fromC(C.g_type_info_get_tag(self.raw));
+        }
+
+        pub fn getInterface(self: Self) ?BaseInfo {
+            if (C.g_type_info_get_interface(self.raw)) |raw| {
+                return BaseInfo.fromC(raw);
+            }
+            return null;
+        }
+
+        pub fn isPointer(self: Self) bool {
+            return gbool(C.g_type_info_is_pointer(self.raw));
+        }
+
+        pub fn getArrayType(self: Self) ArrayType {
+            return ArrayType.fromC(C.g_type_info_get_array_type(self.raw));
+        }
+
+        pub fn getParamType(self: Self, n: c_int) ?TypeInfo {
+            if (C.g_type_info_get_param_type(self.raw, n)) |ptr| {
+                return TypeInfo.fromC(ptr);
+            }
+            return null;
+        }
+
+        pub fn getArrayFixedSize(self: Self) ?usize {
+            const size = C.g_type_info_get_array_fixed_size(self.raw);
+            if (size == -1) {
+                return null;
+            }
+            return @intCast(size);
+        }
+        pub fn getArrayLength(self: Self) ?usize {
+            const size = C.g_type_info_get_array_length(self.raw);
+            if (size == -1) {
+                return null;
+            }
+            return @intCast(size);
         }
     };
 }
 
-fn subclass(comptime Super: type, comptime Self: type) type {
-    return struct {
-        raw: *Raw,
+const Direction = enum(c_uint) {
+    In = C.GI_DIRECTION_IN,
+    Out = C.GI_DIRECTION_OUT,
+    InOut = C.GI_DIRECTION_INOUT,
+};
 
-        const Raw = Self.Raw;
-        pub usingnamespace Self;
-        pub usingnamespace Super;
-
-        pub fn fromC(raw: [*c]Raw) Self {
-            return Self{ .raw = raw };
-        }
-    };
-}
-
-pub const RegisteredTypeInfo = struct {
+pub const ArgInfo = struct {
     raw: *Raw,
 
-    pub const Raw = C.GIRegisteredTypeInfo;
-    pub const Super = BaseInfo;
+    pub usingnamespace ExtendArgInfo(Self, Raw);
+
     const Self = @This();
+    pub const Raw = C.GIArgInfo;
 
-    // Boilerplate
-    pub fn fromC(raw: [*c]Raw) Self {
-        return Self{ .raw = raw };
-    }
-
-    pub fn ref(self: Self) Self {
-        return Self.fromC(self.super().ref().raw);
-    }
-
-    pub fn super(self: Self) Super {
-        return Super.fromC(@ptrCast(*Super.Raw, self.raw));
-    }
-
-    pub fn tryCast(self: Self, comptime T: type) ?T {
-        return self.super().tryCast(T);
-    }
-
-    pub fn unref(self: Self) void {
-        self.super().unref();
-    }
-
-    // Subclass code
-    fn getTypeName(self: Self) String {
-        var str = C.g_registered_type_info_get_type_name(self.raw);
-        return String.fromC(str, false);
-    }
-
-    fn getGType(self: Self) C.GType {
-        return C.g_registered_type_info_get_type_name(self.raw);
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_ARG_INFO(value.raw);
     }
 };
+
+pub fn ExtendArgInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        pub fn getClosure(self: Self) ?usize {
+            const index = C.g_arg_info_get_closure(self.raw);
+            if (index == -1) null else @as(usize, @intCast(index));
+        }
+        pub fn getDestroy(self: Self) ?usize {
+            const index = C.g_arg_info_get_destroy(self.raw);
+            if (index == -1) null else @as(usize, @intCast(index));
+        }
+        pub fn getDirection(self: Self) Direction {
+            return @enumFromInt(C.g_arg_info_get_direction(self.raw));
+        }
+        pub fn getOwnershipTransfer(self: Self) C.GITransfer {
+            return C.g_arg_info_get_ownership_transfer(self.raw);
+        }
+        pub fn getScope(self: Self) C.GIScopeType {
+            return C.g_arg_info_get_scope(
+                self.raw,
+            );
+        }
+        pub fn getType(self: Self) TypeInfo {
+            return TypeInfo.fromC(C.g_arg_info_get_type(
+                self.raw,
+            ));
+        }
+        // Takes ownership of `ty`
+        pub fn loadType(self: Self, ty: TypeInfo) void {
+            return C.g_arg_info_load_type(self.raw, ty.raw);
+        }
+        pub fn mayBeNull(self: Self) bool {
+            return gbool(C.g_arg_info_may_be_null(self.raw));
+        }
+        pub fn isCallerAllocates(self: Self) bool {
+            return gbool(C.g_arg_info_is_caller_allocates(self.raw));
+        }
+        pub fn isOptional(self: Self) bool {
+            return gbool(C.g_arg_info_is_optional(self.raw));
+        }
+        pub fn isReturnValue(self: Self) C.gboolean {
+            return gbool(C.g_arg_info_is_return_value(self.raw));
+        }
+        pub fn isSkip(self: Self) C.gboolean {
+            return gbool(C.g_arg_info_is_skip(self.raw));
+        }
+    };
+}
+
+const Argument = C.GIArgument;
+
+pub fn toArgument(value: anytype) Argument {
+    const utils = struct {
+        fn fail() noreturn {
+            @compileError("Value of type " ++ @typeName(@TypeOf(value)) ++ " is not convertible to GIArgument.");
+        }
+        fn ceilPow2(number: comptime_int) comptime_int {
+            const log2 = std.math.log_2_ceil(@TypeOf(number), number);
+            return log2 * log2;
+        }
+        fn isWrapper() bool {
+            return @hasField(value, "raw") and
+                @typeInfo(@TypeOf(value.raw)) == .Pointer;
+        }
+        fn pointer(ptr: anytype) Argument {
+            return .{ .v_pointer = @as(C.gpointer, @ptrCast(ptr)) };
+        }
+    };
+
+    if (utils.isWrapper()) {
+        return utils.pointer(value.raw);
+    }
+
+    return switch (@TypeOf(value)) {
+        .Pointer => utils.pointer(value),
+        .Float => |fl| if (fl.bits == 32) .{ .v_float = value } else if (fl.bits == 64) .{ .v_doube = value } else utils.fail(),
+        .Bool => .{ .v_boolean = value },
+        .Optional => |opt| if (@typeInfo(opt.child) == .Pointer) utils.pointer(value) else utils.fail(),
+        _ => utils.fail(),
+    };
+}
+
+pub const CallableInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendCallableInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GICallableInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_CALLABLE_INFO(value.raw);
+    }
+};
+
+pub fn ExtendCallableInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendBaseInfo(Self, Raw);
+
+        pub fn isMethod(self: Self) bool {
+            return gbool(C.g_callable_info_is_method(self.raw));
+        }
+
+        pub fn getReturnType(self: Self) TypeInfo {
+            const raw = C.g_callable_info_get_return_type(self.raw);
+            return TypeInfo.fromC(raw);
+        }
+
+        pub fn mayReturnNull(self: Self) bool {
+            return gbool(C.g_callable_info_may_return_null(self.raw));
+        }
+
+        pub fn getArgsIterator(self: Self) ArgsIterator {
+            return ArgsIterator.new(.{ .raw = self.raw });
+        }
+
+        pub fn invoke(
+            self: Self,
+            in_args: []const Argument,
+            out_args: []Argument,
+        ) !Argument {
+            var ret: Argument = undefined;
+            var err: *C.GError = undefined;
+            const result = C.g_function_info_invoke(self.raw, in_args.ptr, in_args.len, out_args.ptr, out_args.len, &ret, &err);
+            if (gbool(result)) {
+                return ret;
+            } else {
+                unreachable;
+            }
+        }
+        const ArgsIterator = Iterator(struct {
+            raw: *Raw,
+
+            pub fn len(self: @This()) c_int {
+                return C.g_callable_info_get_n_args(self.raw);
+            }
+
+            pub fn index(self: @This(), i: c_int) *ArgInfo.Raw {
+                return C.g_callable_info_get_arg(self.raw, i);
+            }
+        }, ArgInfo);
+    };
+}
+
+pub const FunctionInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendFunctionInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GIFunctionInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_FUNCTION_INFO(value.raw);
+    }
+};
+
+pub fn ExtendFunctionInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendCallableInfo(Self, Raw);
+
+        pub fn getSymbol(self: Self) GString {
+            const raw = C.g_function_info_get_symbol(self.raw);
+            return stringFromC(raw).?;
+        }
+    };
+}
+
+pub const CallbackInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendCallbackInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GICallbackInfo;
+
+    pub fn is(value: anytype) bool {
+        return value.getInfoType() == .Callback;
+    }
+};
+
+pub fn ExtendCallbackInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendCallableInfo(Self, Raw);
+    };
+}
+
+pub const ValueInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendValueInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GIValueInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_VALUE_INFO(value.raw);
+    }
+};
+
+pub fn ExtendValueInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendRegisteredTypeInfo(Self, Raw);
+        pub fn getValue(self: Self) u64 {
+            return @intCast(C.g_value_info_get_value(self.raw));
+        }
+    };
+}
+
+pub const EnumInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendEnumInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GIEnumInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_ENUM_INFO(value.raw);
+    }
+};
+
+pub fn ExtendEnumInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendRegisteredTypeInfo(Self, Raw);
+
+        pub const ValuesIterator = Iterator(struct {
+            raw: *Raw,
+            pub fn len(self: @This()) c_int {
+                return C.g_enum_info_get_n_values(self.raw);
+            }
+            pub fn index(self: @This(), i: c_int) *ValueInfo.Raw {
+                return C.g_enum_info_get_value(self.raw, i);
+            }
+        }, ValueInfo);
+
+        pub const MethodsIterator = Iterator(struct {
+            raw: *Raw,
+            pub fn len(self: @This()) c_int {
+                return C.g_enum_info_get_n_methods(self.raw);
+            }
+            pub fn index(self: @This(), i: c_int) *FunctionInfo.Raw {
+                return C.g_enum_info_get_method(self.raw, i);
+            }
+        }, FunctionInfo);
+
+        pub fn getValuesIterator(self: Self) ValuesIterator {
+            return ValuesIterator.new(.{ .raw = self.raw });
+        }
+
+        pub fn getMethodsIterator(self: Self) MethodsIterator {
+            return MethodsIterator.new(.{ .raw = self.raw });
+        }
+
+        pub fn getStorageType(self: Self) TypeTag {
+            const raw = C.g_enum_info_get_storage_type(self.raw);
+            return TypeTag.fromC(raw);
+        }
+
+        pub fn getErrorDomain(self: Self) ?GString {
+            const raw = C.g_enum_info_get_error_domain(self.raw);
+            return stringFromC(raw);
+        }
+    };
+}
+
+pub const ObjectInfo = struct {
+    raw: *Raw,
+
+    pub usingnamespace ExtendObjectInfo(Self, Raw);
+
+    const Self = @This();
+    pub const Raw = C.GIObjectInfo;
+
+    pub fn is(value: anytype) bool {
+        return C.GI_IS_OBJECT_INFO(value.raw);
+    }
+};
+
+pub fn ExtendObjectInfo(comptime Self: type, comptime Raw: type) type {
+    return struct {
+        pub usingnamespace ExtendRegisteredTypeInfo(Self, Raw);
+
+        pub fn getParent(self: Self) Self {
+            return Self.fromC(C.g_object_info_get_parent(self.raw));
+        }
+
+        pub fn getMethodsIterator(self: Self) MethodsIterator {
+            return MethodsIterator.new(.{ .raw = self.raw });
+        }
+
+        pub fn getFieldsIterator(self: Self) FieldsIterator {
+            return FieldsIterator.new(.{ .raw = self.raw });
+        }
+
+        pub const MethodsIterator = Iterator(struct {
+            raw: *Raw,
+            pub fn len(self: @This()) c_int {
+                return C.g_object_info_get_n_methods(self.raw);
+            }
+            pub fn index(self: @This(), i: c_int) *FunctionInfo.Raw {
+                return C.g_object_info_get_method(self.raw, i);
+            }
+        }, FunctionInfo);
+
+        pub const FieldsIterator = Iterator(struct {
+            raw: *Raw,
+            pub fn len(self: @This()) c_int {
+                return C.g_object_info_get_n_fields(self.raw);
+            }
+            pub fn index(self: @This(), i: c_int) *FieldInfo.Raw {
+                return C.g_object_info_get_field(self.raw, i);
+            }
+        }, FieldInfo);
+    };
+}
+
+// Creating a new sub struct boilerplate:
+// pub const YourType = struct {
+//     raw: *Raw,
+
+//     pub usingnamespace ExtendYourType(Self, Raw);
+
+//     const Self = @This();
+//     pub const Raw = C.GIYourType;
+//
+//     pub fn is(value: anytype) bool {
+//         return C.GI_IS_YOURTYPE_INFO(value.raw);
+//     }
+// };
+
+// pub fn ExtendYourType(comptime Self: type, comptime Raw: type) type {
+//     return struct {
+//         pub usingnamespace ExtendPARENTTYPE(Self, Raw);
+//
+//         // Your methods:
+//
+//     };
+// }
